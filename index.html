@@ -3585,7 +3585,7 @@ function openModal(sym){
   ].map(([l,v])=>`<div class="mi"><div class="ml">${l}</div><div class="mv">${v}</div></div>`).join('');
   document.getElementById('m-tv').href=`https://www.tradingview.com/chart/?symbol=NSE:${sym}`;
   document.getElementById('m-sc').href=`https://www.screener.in/company/${sym}/`;
-  document.getElementById('m-kite').href=`https://kite.zerodha.com/chart/web/ciq/NSE/${sym}/EQ`;
+  document.getElementById('m-kite').href=`https://kite.zerodha.com/chart/web/tvc/NSE/${sym}/EQ`;
   document.getElementById('m-notes').value=notes[sym]||'';
   const blk=blocked[sym];
   document.getElementById('m-blkBtn').className=blk?'btn-ublk':'btn-blk';
@@ -3817,7 +3817,7 @@ function filterBySec(sec){
 function importCSV(input){
   const file=input.files[0];if(!file)return;
   const reader=new FileReader();
-  reader.onload=function(e){
+  reader.onload=async function(e){
     const text=e.target.result;
     const lines=text.split('\n').map(l=>l.trim()).filter(l=>l);
     if(!lines.length){toast('Empty file','err');return;}
@@ -3894,15 +3894,19 @@ function importCSV(input){
           });
         }
       });
-      // Remaining inventory = open positions
-      inventory.filter(inv=>inv.remaining>0).forEach(inv=>{
+      // Remaining inventory = open positions (consolidate into ONE entry per symbol)
+      const openLots=inventory.filter(inv=>inv.remaining>0);
+      if(openLots.length>0){
+        const totalOpenQty=openLots.reduce((a,b)=>a+b.remaining,0);
+        const avgOpenPrice=openLots.reduce((a,b)=>a+b.remaining*b.price,0)/totalOpenQty;
+        const firstOpenDate=openLots[0].date;
         newTrades.push({
           id:Date.now()+Math.random(),sym,type:'L',contract:'D',
-          qty:inv.remaining,lotSize:1,buyDate:inv.date,buyPrice:parseFloat(inv.price.toFixed(2)),
+          qty:totalOpenQty,lotSize:1,buyDate:firstOpenDate,buyPrice:parseFloat(avgOpenPrice.toFixed(2)),
           sellDate:null,sellPrice:null,sl:0,pnl:null,pnlPct:null,
           daysHeld:null,status:'Open',source:'csv',checklist:{}
         });
-      });
+      }
     });
     if(confirm(`Found ${newTrades.length} trades. Replace journal or add?\nOK = Replace | Cancel = Add`)){
       journal=newTrades;
