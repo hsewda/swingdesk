@@ -3341,20 +3341,26 @@ async function save(){
 }
 
 async function load(){
-  // 1. Load from localStorage immediately
-  screenerData=JSON.parse(localStorage.getItem('lc4_screener')||'{}');
-  journal=JSON.parse(localStorage.getItem('lc4_journal')||'[]');
-  notes=JSON.parse(localStorage.getItem('lc4_notes')||'{}');
-  blocked=JSON.parse(localStorage.getItem('lc4_blocked')||'{}');
-  watchlists=JSON.parse(localStorage.getItem('lc4_wl')||'{"tm":[],"mo":[],"be":[],"mi":[]}');
-  capital=parseFloat(localStorage.getItem('lc4_capital')||100000);
+  // 1. Always load from localStorage first (instant, works offline)
+  try{screenerData=JSON.parse(localStorage.getItem('lc4_screener')||'{}');}catch(e){screenerData={};}
+  try{journal=JSON.parse(localStorage.getItem('lc4_journal')||'[]');}catch(e){journal=[];}
+  try{notes=JSON.parse(localStorage.getItem('lc4_notes')||'{}');}catch(e){notes={};}
+  try{blocked=JSON.parse(localStorage.getItem('lc4_blocked')||'{}');}catch(e){blocked={};}
+  try{watchlists=JSON.parse(localStorage.getItem('lc4_wl')||'{"tm":[],"mo":[],"be":[],"mi":[]}');}catch(e){watchlists={tm:[],mo:[],be:[],mi:[]};}
+  try{capital=parseFloat(localStorage.getItem('lc4_capital')||100000);}catch(e){capital=100000;}
   if(!watchlists.mi)watchlists.mi=[];
-  // 2. Pull from Supabase (cloud wins)
-  const sb=getSB(); if(!sb){syncDot('err');return;}
+  // 2. Try Supabase (cloud wins if available) - never blocks the app
+  const sb=getSB();
+  if(!sb){syncDot('');return;}
   syncDot('busy');
   try{
     const {data,error}=await sb.from('lcdata').select('*').eq('id',SB_ROW).single();
-    if(error&&error.code!=='PGRST116'){syncDot('err');console.error('SB load:',error);return;}
+    if(error){
+      // PGRST116 = no row yet (first time) — that's fine
+      if(error.code==='PGRST116'){syncDot('ok');}
+      else{syncDot('err');console.error('SB load:',error.message||error);}
+      return;
+    }
     if(data){
       screenerData=data.screener||{};
       journal=data.journal||[];
@@ -3363,7 +3369,6 @@ async function load(){
       watchlists=data.watchlists||{tm:[],mo:[],be:[],mi:[]};
       capital=data.capital||100000;
       if(!watchlists.mi)watchlists.mi=[];
-      // Cache locally
       localStorage.setItem('lc4_screener',JSON.stringify(screenerData));
       localStorage.setItem('lc4_journal',JSON.stringify(journal));
       localStorage.setItem('lc4_notes',JSON.stringify(notes));
@@ -3372,7 +3377,11 @@ async function load(){
       localStorage.setItem('lc4_capital',capital);
     }
     syncDot('ok');
-  }catch(e){syncDot('err');console.error('SB load exception:',e);}
+  }catch(e){
+    syncDot('err');
+    console.error('SB load exception:',e.message||e);
+    // App still works from localStorage - no crash
+  }
 }
 
 // ── LOGIN ──
@@ -3894,7 +3903,7 @@ function importCSV(input){
           });
         }
       });
-      // Remaining inventory = open positions (consolidate into ONE entry per symbol)
+      // Remaining inventory = open positions (consolidated into ONE entry per symbol)
       const openLots=inventory.filter(inv=>inv.remaining>0);
       if(openLots.length>0){
         const totalOpenQty=openLots.reduce((a,b)=>a+b.remaining,0);
