@@ -3585,7 +3585,7 @@ function openModal(sym){
   ].map(([l,v])=>`<div class="mi"><div class="ml">${l}</div><div class="mv">${v}</div></div>`).join('');
   document.getElementById('m-tv').href=`https://www.tradingview.com/chart/?symbol=NSE:${sym}`;
   document.getElementById('m-sc').href=`https://www.screener.in/company/${sym}/`;
-  document.getElementById('m-kite').href=`https://kite.zerodha.com/chart/ext/ciq/NSE/${sym}/`;
+  document.getElementById('m-kite').href=`https://kite.zerodha.com/chart/web/ciq/NSE/${sym}/EQ`;
   document.getElementById('m-notes').value=notes[sym]||'';
   const blk=blocked[sym];
   document.getElementById('m-blkBtn').className=blk?'btn-ublk':'btn-blk';
@@ -3842,25 +3842,65 @@ function importCSV(input){
       });
     }
     if(!trades.length){toast('No trades found in CSV','err');return;}
+    // Group by symbol, then aggregate fills by date to get actual positions
     const bySymbol={};
     trades.forEach(t=>{if(!bySymbol[t.sym])bySymbol[t.sym]=[];bySymbol[t.sym].push(t);});
     const newTrades=[];
     Object.entries(bySymbol).forEach(([sym,ts])=>{
-      const buys=ts.filter(t=>t.type==='buy').sort((a,b)=>new Date(a.date)-new Date(b.date));
-      const sells=ts.filter(t=>t.type==='sell').sort((a,b)=>new Date(a.date)-new Date(b.date));
-      const usedSells=new Set();
-      buys.forEach(buy=>{
-        const sell=sells.find((s,i)=>!usedSells.has(i)&&new Date(s.date)>=new Date(buy.date)&&Math.abs(s.qty-buy.qty)<buy.qty*0.1);
-        let sellIdx=sells.indexOf(sell);if(sell)usedSells.add(sellIdx);
-        const br=0.002;const netBuy=buy.price*(1+br);const netSell=sell?sell.price*(1-br):null;
-        const pnl=sell?(netSell-netBuy)*buy.qty:null;
-        const days=sell?Math.round((new Date(sell.date)-new Date(buy.date))/(1000*60*60*24)):null;
+      // Aggregate multiple fills on same date into single buy/sell
+      const dayMap={};
+      ts.forEach(t=>{
+        const key=t.date+'_'+t.type;
+        if(!dayMap[key]){dayMap[key]={date:t.date,type:t.type,totalQty:0,totalVal:0};}
+        dayMap[key].totalQty+=t.qty;
+        dayMap[key].totalVal+=t.qty*t.price;
+      });
+      const agg=Object.values(dayMap).map(d=>({
+        date:d.date,type:d.type,
+        qty:d.totalQty,
+        price:d.totalVal/d.totalQty // weighted avg price
+      }));
+      const buys=agg.filter(t=>t.type==='buy').sort((a,b)=>new Date(a.date)-new Date(b.date));
+      const sells=agg.filter(t=>t.type==='sell').sort((a,b)=>new Date(a.date)-new Date(b.date));
+      // FIFO match: track running inventory
+      let inventory=[]; // [{date, qty, price}]
+      buys.forEach(b=>inventory.push({date:b.date,qty:b.qty,price:b.price,remaining:b.qty}));
+      sells.forEach(sell=>{
+        let sellRemaining=sell.qty;
+        const matchedBuys=[];
+        for(let inv of inventory){
+          if(inv.remaining<=0||sellRemaining<=0)continue;
+          if(new Date(sell.date)<new Date(inv.date))continue;
+          const matched=Math.min(inv.remaining,sellRemaining);
+          matchedBuys.push({qty:matched,price:inv.price,date:inv.date});
+          inv.remaining-=matched;
+          sellRemaining-=matched;
+        }
+        if(matchedBuys.length>0){
+          const totalQty=matchedBuys.reduce((a,b)=>a+b.qty,0);
+          const avgBuy=matchedBuys.reduce((a,b)=>a+b.qty*b.price,0)/totalQty;
+          const firstBuyDate=matchedBuys[0].date;
+          const br=0.002;
+          const netBuy=avgBuy*(1+br);const netSell=sell.price*(1-br);
+          const pnl=(netSell-netBuy)*totalQty;
+          const days=Math.round((new Date(sell.date)-new Date(firstBuyDate))/(1000*60*60*24));
+          newTrades.push({
+            id:Date.now()+Math.random(),sym,type:'L',contract:'D',
+            qty:totalQty,lotSize:1,buyDate:firstBuyDate,buyPrice:parseFloat(avgBuy.toFixed(2)),
+            sellDate:sell.date,sellPrice:parseFloat(sell.price.toFixed(2)),
+            sl:0,pnl:parseFloat(pnl.toFixed(2)),
+            pnlPct:parseFloat((pnl/(netBuy*totalQty)*100).toFixed(2)),
+            daysHeld:days,status:'Closed',source:'csv',checklist:{}
+          });
+        }
+      });
+      // Remaining inventory = open positions
+      inventory.filter(inv=>inv.remaining>0).forEach(inv=>{
         newTrades.push({
           id:Date.now()+Math.random(),sym,type:'L',contract:'D',
-          qty:buy.qty,lotSize:1,buyDate:buy.date,buyPrice:buy.price,
-          sellDate:sell?sell.date:null,sellPrice:sell?sell.price:null,
-          sl:0,pnl,pnlPct:sell?(pnl/(netBuy*buy.qty)*100):null,
-          daysHeld:days,status:sell?'Closed':'Open',source:'csv',checklist:{}
+          qty:inv.remaining,lotSize:1,buyDate:inv.date,buyPrice:parseFloat(inv.price.toFixed(2)),
+          sellDate:null,sellPrice:null,sl:0,pnl:null,pnlPct:null,
+          daysHeld:null,status:'Open',source:'csv',checklist:{}
         });
       });
     });
